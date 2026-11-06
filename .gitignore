@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+local_settings.py
+postgres_data/
+.idea/
+.pytest_cache/
+htmlcov/
+*.sqlite3
