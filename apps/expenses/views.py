@@ -1,9 +1,14 @@
-from rest_framework import viewsets, permissions
-from .models import Expense, ExpenseCategory
-from .serializers import ExpenseSerializer, ExpenseCategorySerializer
-from .filters import ExpenseFilter
-from rest_framework import filters
+from django.db.models import Count, Sum
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import filters, permissions, status, viewsets
+from rest_framework.decorators import action
+from rest_framework.response import Response
+
+from .filters import ExpenseFilter
+from .models import Expense, ExpenseCategory
+from .permissions import IsManagerOrAdmin
+from .serializers import ExpenseCategorySerializer, ExpenseSerializer
 
 
 class ExpenseCategoryViewSet(viewsets.ModelViewSet):
@@ -15,32 +20,113 @@ class ExpenseCategoryViewSet(viewsets.ModelViewSet):
 class ExpenseViewSet(viewsets.ModelViewSet):
     serializer_class = ExpenseSerializer
     permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter,
+    ]
+    filterset_class = ExpenseFilter
+    search_fields = ["title", "description"]
+    ordering_fields = ["amount", "expense_date", "created_at"]
+    ordering = ["-expense_date"]
 
     def get_queryset(self):
-        return Expense.objects.filter(user=self.request.user)
+        user = self.request.user
+        if (
+            getattr(user, "role", None) in ["ADMIN", "MANAGER"]
+            or user.is_staff
+            or user.is_superuser
+        ):
+            return Expense.objects.all()
+        return Expense.objects.filter(user=user)
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
-    class ExpenseViewSet(viewsets.ModelViewSet):
-            serializer_class = ExpenseSerializer
-            permission_classes = [permissions.IsAuthenticated]
-            filter_backends = [
-                DjangoFilterBackend,
-                filters.SearchFilter,
-                filters.OrderingFilter,
-            ]
-            filterset_class = ExpenseFilter
-            search_fields = ["title", "description"]
-            ordering_fields = ["amount", "expense_date", "created_at"]
-            ordering = ["-expense_date"]
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[IsManagerOrAdmin],
+        url_path="approve",
+    )
+    def approve(self, request, pk=None):
+        expense = self.get_object()
+        if expense.status not in [Expense.Status.SUBMITTED, Expense.Status.DRAFT]:
+            return Response(
+                {"error": f"Cannot approve an expense with status '{expense.status}'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-            def get_queryset(self):
-                user = self.request.user
-                if (
-                        getattr(user, "role", None) in ["ADMIN", "MANAGER"]
-                        or user.is_staff
-                        or user.is_superuser
-                ):
-                    return Expense.objects.all()
-                return Expense.objects.filter(user=user)
+        expense.status = Expense.Status.APPROVED
+        expense.approved_by = request.user
+        expense.approved_at = timezone.now()
+        expense.rejection_reason = ""
+        expense.save()
+
+        serializer = self.get_serializer(expense)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[IsManagerOrAdmin],
+        url_path="reject",
+    )
+    def reject(self, request, pk=None):
+        expense = self.get_object()
+        rejection_reason = request.data.get("rejection_reason", "").strip()
+        if not rejection_reason:
+            return Response(
+                {"error": "A rejection reason is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        expense.status = Expense.Status.REJECTED
+        expense.approved_by = request.user
+        expense.approved_at = timezone.now()
+        expense.rejection_reason = rejection_reason
+        expense.save()
+
+        serializer = self.get_serializer(expense)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["get"], url_path="summary")
+    def summary(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        totals_by_currency = (
+            queryset.values("currency")
+            .annotate(
+                total_amount=Sum("amount"),
+                count=Count("id"),
+            )
+            .order_by("currency")
+        )
+
+        by_status = (
+            queryset.values("status")
+            .annotate(
+                total_amount=Sum("amount"),
+                count=Count("id"),
+            )
+            .order_by("status")
+        )
+
+        by_category = (
+            queryset.values("category__name")
+            .annotate(
+                total_amount=Sum("amount"),
+                count=Count("id"),
+            )
+            .order_by("-total_amount")
+        )
+
+        return Response(
+            {
+                "total_records": queryset.count(),
+                "totals_by_currency": list(totals_by_currency),
+                "by_status": list(by_status),
+                "by_category": list(by_category),
+            },
+            status=status.HTTP_200_OK,
+        )
