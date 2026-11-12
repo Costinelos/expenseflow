@@ -1,8 +1,11 @@
+import csv
 from django.db.models import Count, Sum
+from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
 from .filters import ExpenseFilter
@@ -14,7 +17,11 @@ from .serializers import ExpenseCategorySerializer, ExpenseSerializer
 class ExpenseCategoryViewSet(viewsets.ModelViewSet):
     queryset = ExpenseCategory.objects.filter(is_active=True)
     serializer_class = ExpenseCategorySerializer
-    permission_classes = [permissions.IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ["list", "retrieve"]:
+            return [permissions.IsAuthenticated()]
+        return [IsManagerOrAdmin()]
 
 
 class ExpenseViewSet(viewsets.ModelViewSet):
@@ -43,6 +50,43 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        if instance.status in [Expense.Status.APPROVED, Expense.Status.REJECTED]:
+            raise ValidationError(
+                {"error": "Cannot modify an expense that has already been approved or rejected."}
+            )
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance.status in [Expense.Status.APPROVED, Expense.Status.REJECTED]:
+            raise ValidationError(
+                {"error": "Cannot delete an expense that has already been approved or rejected."}
+            )
+        instance.delete()
+
+    @action(detail=True, methods=["post"], url_path="submit")
+    def submit(self, request, pk=None):
+        expense = self.get_object()
+
+        if expense.user != request.user:
+            return Response(
+                {"error": "You can only submit your own expenses."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if expense.status != Expense.Status.DRAFT:
+            return Response(
+                {"error": f"Only DRAFT expenses can be submitted. Current status: '{expense.status}'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        expense.status = Expense.Status.SUBMITTED
+        expense.save()
+
+        serializer = self.get_serializer(expense)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
     @action(
         detail=True,
         methods=["post"],
@@ -51,9 +95,9 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     )
     def approve(self, request, pk=None):
         expense = self.get_object()
-        if expense.status not in [Expense.Status.SUBMITTED, Expense.Status.DRAFT]:
+        if expense.status != Expense.Status.SUBMITTED:
             return Response(
-                {"error": f"Cannot approve an expense with status '{expense.status}'."},
+                {"error": f"Only SUBMITTED expenses can be approved. Current status: '{expense.status}'."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -113,7 +157,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         )
 
         by_category = (
-            queryset.values("category__name")
+            queryset.values("category__name", "category__monthly_budget")
             .annotate(
                 total_amount=Sum("amount"),
                 count=Count("id"),
@@ -130,3 +174,36 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=False, methods=["get"], url_path="export-csv")
+    def export_csv(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="expenses_report.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow([
+            "ID",
+            "Date",
+            "Title",
+            "Category",
+            "Amount",
+            "Currency",
+            "Status",
+            "Employee Email",
+        ])
+
+        for expense in queryset:
+            writer.writerow([
+                str(expense.id),
+                expense.expense_date,
+                expense.title,
+                expense.category.name if expense.category else "",
+                expense.amount,
+                expense.currency,
+                expense.status,
+                expense.user.email,
+            ])
+
+        return response
