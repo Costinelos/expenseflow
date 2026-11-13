@@ -66,3 +66,20 @@ class ExpenseSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         validated_data["user"] = self.context["request"].user
         return super().create(validated_data)
+
+    def validate_receipt(self, value):
+        if not value:
+            return value
+
+        max_size = 5 * 1024 * 1024
+        if value.size > max_size:
+            raise serializers.ValidationError("Receipt file size cannot exceed 5MB.")
+
+        allowed_extensions = ["jpg", "jpeg", "png", "pdf"]
+        ext = value.name.split(".")[-1].lower()
+        if ext not in allowed_extensions:
+            raise serializers.ValidationError(
+                "Unsupported file format. Allowed formats: JPG, JPEG, PNG, PDF."
+            )
+
+        return value

@@ -1,5 +1,6 @@
 from decimal import Decimal
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -73,3 +74,33 @@ class ExpenseWorkflowTests(APITestCase):
         detail_url = reverse("expenses:expense-detail", kwargs={"pk": self.expense.id})
         res_edit = self.client.patch(detail_url, {"amount": "999.00"})
         self.assertEqual(res_edit.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_manager_cannot_approve_above_limit(self):
+        self.manager.approval_limit = Decimal("100.00")
+        self.manager.save()
+
+        self.expense.status = Expense.Status.SUBMITTED
+        self.expense.save()
+
+        self.client.force_authenticate(user=self.manager)
+        url = reverse("expenses:expense-approve", kwargs={"pk": self.expense.id})
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_reject_invalid_receipt_extension(self):
+        self.client.force_authenticate(user=self.employee)
+        url = reverse("expenses:expense-list")
+        bad_file = SimpleUploadedFile("virus.exe", b"dummy content", content_type="application/octet-stream")
+        response = self.client.post(
+            url,
+            {
+                "category": self.category.id,
+                "title": "Test Bon Invalid",
+                "amount": "50.00",
+                "currency": "RON",
+                "expense_date": "2026-11-13",
+                "receipt": bad_file,
+            },
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

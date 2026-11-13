@@ -101,6 +101,20 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        user = request.user
+        if (
+            getattr(user, "role", None) == "MANAGER"
+            and not user.is_superuser
+            and getattr(user, "approval_limit", None) is not None
+            and expense.amount > user.approval_limit
+        ):
+            return Response(
+                {
+                    "error": f"Expense amount ({expense.amount} {expense.currency}) exceeds your approval limit ({user.approval_limit})."
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         expense.status = Expense.Status.APPROVED
         expense.approved_by = request.user
         expense.approved_at = timezone.now()
