@@ -7,6 +7,8 @@ from rest_framework import filters, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
+from django.db import transaction
+from .tasks import notify_expense_decision
 
 from .filters import ExpenseFilter
 from .models import Expense, ExpenseCategory
@@ -121,6 +123,15 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         expense.rejection_reason = ""
         expense.save()
 
+        request_id = getattr(request, "request_id", None)
+        transaction.on_commit(
+            lambda: notify_expense_decision.delay(
+                str(expense.id),
+                Expense.Status.APPROVED,
+                request_id,
+            )
+        )
+
         serializer = self.get_serializer(expense)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -144,6 +155,14 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         expense.approved_at = timezone.now()
         expense.rejection_reason = rejection_reason
         expense.save()
+        request_id = getattr(request, "request_id", None)
+        transaction.on_commit(
+            lambda: notify_expense_decision.delay(
+                str(expense.id),
+                Expense.Status.REJECTED,
+                request_id,
+            )
+        )
 
         serializer = self.get_serializer(expense)
         return Response(serializer.data, status=status.HTTP_200_OK)

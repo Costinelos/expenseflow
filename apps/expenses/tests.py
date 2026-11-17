@@ -1,6 +1,8 @@
 from decimal import Decimal
 from django.contrib.auth import get_user_model
+from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -21,6 +23,7 @@ class ExpenseWorkflowTests(APITestCase):
             email="manager@expenseflow.com",
             password="parola123",
             role="MANAGER",
+            approval_limit=Decimal("1000.00"),
         )
         self.category = ExpenseCategory.objects.create(
             name="IT & Software",
@@ -57,6 +60,10 @@ class ExpenseWorkflowTests(APITestCase):
         response = self.client.post(url)
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    @override_settings(
+        CELERY_TASK_ALWAYS_EAGER=True,
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    )
     def test_full_approval_workflow_and_edit_lock(self):
         self.client.force_authenticate(user=self.employee)
         submit_url = reverse("expenses:expense-submit", kwargs={"pk": self.expense.id})
@@ -66,9 +73,15 @@ class ExpenseWorkflowTests(APITestCase):
 
         self.client.force_authenticate(user=self.manager)
         approve_url = reverse("expenses:expense-approve", kwargs={"pk": self.expense.id})
-        res_approve = self.client.post(approve_url)
+        with self.captureOnCommitCallbacks(execute=True):
+            res_approve = self.client.post(approve_url)
         self.assertEqual(res_approve.status_code, status.HTTP_200_OK)
         self.assertEqual(res_approve.data["status"], Expense.Status.APPROVED)
+
+        # Verify async Celery notification email was sent on commit
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("APPROVED", mail.outbox[0].subject)
+        self.assertEqual(mail.outbox[0].to, [self.employee.email])
 
         self.client.force_authenticate(user=self.employee)
         detail_url = reverse("expenses:expense-detail", kwargs={"pk": self.expense.id})
