@@ -1,0 +1,13 @@
+$dockerignoreContent = @'
+.venv
+.git
+.gitignore
+.idea
+__pycache__
+*.pyc
+.env
+media
+staticfiles
+'@
+
+[System.IO.File]::WriteAllText("$PWD\.dockerignore", $dockerignoreContent)
